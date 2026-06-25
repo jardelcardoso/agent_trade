@@ -1,0 +1,7 @@
+execution_mode:
+  dry_run: true
+  timeframe: "15m"
+
+risk_management:
+  risk_per_trade_percent: 1.0
+  max_daily_drawdown: 5.0

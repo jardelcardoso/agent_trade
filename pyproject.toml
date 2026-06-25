@@ -1,0 +1,14 @@
+[project]
+name = "agent-trade"
+version = "0.1.0"
+description = "Agente autônomo de trading com modo dry run"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas",
+  "PyYAML",
+  "pytest"
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

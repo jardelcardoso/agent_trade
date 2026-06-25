@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: agent-trade
+Version: 0.1.0
+Summary: Agente autônomo de trading com modo dry run
+Requires-Python: >=3.10
+Requires-Dist: pandas
+Requires-Dist: PyYAML
+Requires-Dist: pytest
