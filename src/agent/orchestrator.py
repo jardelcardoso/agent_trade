@@ -13,109 +13,68 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.agent_prompts import SYSTEM_PROMPT
-from src.tools.tech_analysis import TechAnalysisTool
-from src.risk.risk_manager import RiskManager
-from src.tools.market_data import MarketDataTool
+from src.tools.sentiment_data import SentimentTool
 
 class AgentOrchestrator:
+    """Versão 3.0: A IA agora é o Estrategista Macro, não o operador de botões."""
     def __init__(self):
-        # Carrega configurações
         settings_path = PROJECT_ROOT / "config" / "settings.yaml"
         with settings_path.open("r", encoding="utf-8") as file:
             self.settings = yaml.safe_load(file)
             
-        self.provider = self.settings["llm_config"]["provider"]  # 'openai', 'openrouter' ou 'gemini'
+        self.provider = self.settings["llm_config"]["provider"]
         self.model_name = self.settings["llm_config"]["model_name"]
         
+        # Configuração do Provedor (OpenAI, OpenRouter, Gemini)
         if self.provider in {"openai", "openrouter"}:
-            api_key = (
-                os.getenv("OPENROUTER_API_KEY")
-                if self.provider == "openrouter"
-                else os.getenv("OPENAI_API_KEY")
-            )
-            if not api_key:
-                raise ValueError(
-                    "OPENROUTER_API_KEY não configurada"
-                    if self.provider == "openrouter"
-                    else "OPENAI_API_KEY não configurada"
-                )
-
+            api_key = os.getenv("OPENROUTER_API_KEY") if self.provider == "openrouter" else os.getenv("OPENAI_API_KEY")
             client_kwargs = {"api_key": api_key}
             if self.provider == "openrouter":
                 client_kwargs["base_url"] = "https://openrouter.ai/api/v1"
-                client_kwargs["default_headers"] = {
-                    "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", "http://localhost"),
-                    "X-Title": os.getenv("OPENROUTER_APP_NAME", "AgentTrade"),
-                }
-
+                client_kwargs["default_headers"] = {"HTTP-Referer": "http://localhost", "X-Title": "AgentTrade"}
             self.client = OpenAI(**client_kwargs)
         elif self.provider == "gemini":
             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-            self.model = genai.GenerativeModel(
-                model_name=self.model_name,
-                system_instruction=SYSTEM_PROMPT
-            )
+            self.model = genai.GenerativeModel(model_name=self.model_name, system_instruction=SYSTEM_PROMPT)
             
-        self.ta_tool = TechAnalysisTool()
-        self.risk_manager = RiskManager()
-        self.market_tool = MarketDataTool()
+        self.sentiment_tool = SentimentTool()
 
     def _call_llm(self, prompt: str, retries=3):
         for i in range(retries):
             try:
                 if self.provider in {"openai", "openrouter"}:
-                    response = self.client.chat.completions.create(
+                    res = self.client.chat.completions.create(
                         model=self.model_name,
                         messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
                         temperature=0.2
                     )
-                    return response.choices[0].message.content
-                
+                    return res.choices[0].message.content
                 elif self.provider == "gemini":
-                    response = self.model.generate_content(prompt)
-                    return response.text.strip()
-                    
+                    return self.model.generate_content(prompt).text.strip()
             except Exception as e:
-                # Tratamento robusto de cota excedida (429) usando loop em vez de recursão
                 if "429" in str(e) and i < retries - 1:
-                    wait_time = 60 * (i + 1)
-                    logging.warning(f"⚠️ Limite de cota atingido (429). Retentativa {i+1} em {wait_time}s...")
-                    time.sleep(wait_time)
+                    time.sleep(60 * (i + 1))
                 else:
-                    logging.error(f"❌ Erro crítico ao contactar o LLM ({self.provider}): {e}")
-                    return "AGUARDAR. Falha no processamento."
-        return "AGUARDAR. Limite de tentativas excedido."
+                    return "NEUTRAL. Erro de API."
+        return "NEUTRAL. Fallback de segurança."
 
-    def run_cycle(self, symbol: str):
-        logging.info(f"--- [v2.0] Ciclo Iniciado ({self.provider}): {symbol} ---")
+    def define_market_regime(self, symbol: str) -> str:
+        """Consulta o sentimento, pede a análise da IA e salva o regime atual."""
+        logging.info(f"🧠 Convocando Reunião do Comitê de IA (Análise Macro) para {symbol}...")
         
-        self.market_tool.fetch_and_save_incremental(symbol)
-        tech_summary = self.ta_tool.analyze(symbol)
+        sentimento = self.sentiment_tool.get_fear_and_greed()
+        prompt = f"Ativo em análise: {symbol}. Dados de mercado hoje: {sentimento}. Qual o regime de mercado atual para este ativo?"
         
-        if "Dados insuficientes" in tech_summary: 
-            logging.warning("Abortando ciclo por falta de dados.")
-            return
-
-        # Busca a posição atual no banco de dados
-        posicao_atual = self.risk_manager.get_position(symbol)
-        status_posicao = f"Você está COMPRADO em {posicao_atual} unidades." if posicao_atual > 0 else "ZERO (Você NÃO possui posições abertas)."
-
-        # Injeta o contexto da carteira no prompt
-        prompt_usuario = f"Ativo: {symbol}. Posição Atual na Carteira: {status_posicao}\nDados Técnicos: {tech_summary}. Atue como um especialista em trading. Qual a sua decisão (COMPRAR, VENDER, MANTER ou AGUARDAR) e o fundamento técnico?"
+        resposta_ia = self._call_llm(prompt)
+        logging.info(f"👔 Veredito do Estrategista para {symbol}: {resposta_ia}")
         
-        logging.info(f"📝 Prompt enviado à IA: {prompt_usuario}")
-        
-        decisao_ia = self._call_llm(prompt_usuario)
-        logging.info(f"🗣️ Resposta da IA: {decisao_ia}")
-
-        # Extração da ação (COMPRAR/VENDER/AGUARDAR/MANTER)
-        acao = decisao_ia.split(".")[0].split(" ")[0].upper()
-        
-        if acao in ["COMPRAR", "VENDER"]:
-            df_atual = self.market_tool.get_data_for_analysis(symbol, limit=1)
-            preco = df_atual.iloc[-1]['close']
-            self.risk_manager.evaluate_and_execute(symbol, acao, preco, decisao_ia)
-        elif acao == "MANTER":
-            logging.info(f"🛡️ IA decidiu MANTER a posição atual de {symbol}.")
-        else:
-            logging.info(f"⚖️ IA decidiu AGUARDAR (Ficar de fora do mercado).")
+        # Extrai a palavra-chave e salva em um arquivo local para o robô ler
+        regime = resposta_ia.split(".")[0].split(" ")[0].upper()
+        if regime not in ["BULLISH", "BEARISH", "NEUTRAL"]:
+            regime = "NEUTRAL" # Segurança
+            
+        # Salva o regime na memória (arquivo simples especifico por ativo)
+        with open(f"data/{symbol}_regime.txt", "w", encoding="utf-8") as f:
+            f.write(regime)
+            
+        return regime
