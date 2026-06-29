@@ -1,68 +1,56 @@
-from __future__ import annotations
+import pandas as pd
+from binance.client import Client
+from sqlalchemy.sql import func
+from database import SessionLocal, MarketData
+import os
 
-import sqlite3
-from pathlib import Path
-from typing import Any
+class MarketDataTool:
+    def __init__(self):
+        api_key = os.getenv("BINANCE_API_KEY")
+        api_secret = os.getenv("BINANCE_API_SECRET")
+        self.client = Client(api_key, api_secret)
+        self.db_session = SessionLocal()
 
+    def get_latest_timestamp(self, symbol: str):
+        return self.db_session.query(func.max(MarketData.timestamp)).filter(MarketData.symbol == symbol).scalar()
 
-class MarketDataService:
-    """Gerencia a ingestão incremental de candles em SQLite."""
+    def fetch_and_save_incremental(self, symbol: str, interval: str = "15m"):
+        last_date = self.get_latest_timestamp(symbol)
+        start_str = last_date.strftime("%d %b %Y %H:%M:%S") if last_date else "5 days ago UTC"
 
-    def __init__(self, db_path: str | Path | None = None) -> None:
-        self.db_path = Path(db_path or "data/trading_db.sqlite")
-        self._ensure_db()
+        print(f"[{symbol}] Sincronizando preços a partir de {start_str}...")
+        klines = self.client.get_historical_klines(symbol, interval, start_str)
 
-    def _ensure_db(self) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS market_data (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    open REAL NOT NULL,
-                    high REAL NOT NULL,
-                    low REAL NOT NULL,
-                    close REAL NOT NULL,
-                    volume REAL NOT NULL,
-                    UNIQUE(symbol, timestamp)
-                )
-                """
+        if not klines:
+            return False
+
+        new_records = []
+        for k in klines:
+            ts = pd.to_datetime(k[0], unit='ms')
+            if last_date and ts <= last_date:
+                continue
+
+            record = MarketData(
+                symbol=symbol,
+                timestamp=ts,
+                open=float(k[1]),
+                high=float(k[2]),
+                low=float(k[3]),
+                close=float(k[4]),
+                volume=float(k[5])
             )
+            new_records.append(record)
 
-    def sync_market_data(self, symbol: str, candles: list[dict[str, Any]]) -> int:
-        if not candles:
-            return 0
+        if new_records:
+            self.db_session.bulk_save_objects(new_records)
+            self.db_session.commit()
+            print(f"[{symbol}] +{len(new_records)} novas velas inseridas no banco.")
+            return True
+        return False
 
-        with sqlite3.connect(self.db_path) as conn:
-            inserted = 0
-            for candle in candles:
-                cursor = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO market_data (symbol, timestamp, open, high, low, close, volume)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        symbol,
-                        candle["timestamp"],
-                        candle["open"],
-                        candle["high"],
-                        candle["low"],
-                        candle["close"],
-                        candle["volume"],
-                    ),
-                )
-                if cursor.rowcount == 1:
-                    inserted += 1
-            conn.commit()
-
-        return inserted
-
-    def get_last_timestamp(self, symbol: str) -> str | None:
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT timestamp FROM market_data WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
-                (symbol,),
-            ).fetchone()
-        return row[0] if row else None
+    def get_data_for_analysis(self, symbol: str, limit: int = 100) -> pd.DataFrame:
+        query = self.db_session.query(MarketData).filter(MarketData.symbol == symbol).order_by(MarketData.timestamp.desc()).limit(limit)
+        df = pd.read_sql(query.statement, self.db_session.bind)
+        if not df.empty:
+            df = df.sort_values('timestamp').reset_index(drop=True)
+        return df

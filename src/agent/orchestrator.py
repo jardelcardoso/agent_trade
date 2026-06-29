@@ -1,65 +1,114 @@
-from __future__ import annotations
-
+import os
+import sys
+import time
+import logging
 from pathlib import Path
-from typing import Any
 
-from src.agent.decision_policy import DecisionPolicy
-from src.agent.memory import AgentMemory
-from src.brokers.dry_run_broker import DryRunBroker
+from openai import OpenAI
+import yaml
+import google.generativeai as genai
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config.agent_prompts import SYSTEM_PROMPT
+from src.tools.tech_analysis import TechAnalysisTool
 from src.risk.risk_manager import RiskManager
-from src.tools.market_data import MarketDataService
-from src.tools.tech_analysis import TechnicalAnalysisService
+from src.tools.market_data import MarketDataTool
 
+class AgentOrchestrator:
+    def __init__(self):
+        # Carrega configurações
+        settings_path = PROJECT_ROOT / "config" / "settings.yaml"
+        with settings_path.open("r", encoding="utf-8") as file:
+            self.settings = yaml.safe_load(file)
+            
+        self.provider = self.settings["llm_config"]["provider"]  # 'openai', 'openrouter' ou 'gemini'
+        self.model_name = self.settings["llm_config"]["model_name"]
+        
+        if self.provider in {"openai", "openrouter"}:
+            api_key = (
+                os.getenv("OPENROUTER_API_KEY")
+                if self.provider == "openrouter"
+                else os.getenv("OPENAI_API_KEY")
+            )
+            if not api_key:
+                raise ValueError(
+                    "OPENROUTER_API_KEY não configurada"
+                    if self.provider == "openrouter"
+                    else "OPENAI_API_KEY não configurada"
+                )
 
-class Orchestrator:
-    """Orquestra um ciclo simples do agente em modo dry run."""
+            client_kwargs = {"api_key": api_key}
+            if self.provider == "openrouter":
+                client_kwargs["base_url"] = "https://openrouter.ai/api/v1"
+                client_kwargs["default_headers"] = {
+                    "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", "http://localhost"),
+                    "X-Title": os.getenv("OPENROUTER_APP_NAME", "AgentTrade"),
+                }
 
-    def __init__(
-        self,
-        settings_path: str | Path | None = None,
-        db_path: str | Path | None = None,
-        broker: object | None = None,
-    ) -> None:
-        self.db_path = Path(db_path or "data/trading_db.sqlite")
-        self.market_data_service = MarketDataService(db_path=self.db_path)
-        self.tech_analysis_service = TechnicalAnalysisService(db_path=self.db_path)
-        self.risk_manager = RiskManager(settings_path=settings_path, db_path=self.db_path)
-        self.memory = AgentMemory(db_path=self.db_path)
-        self.decision_policy = DecisionPolicy()
-        self.broker = broker or DryRunBroker()
+            self.client = OpenAI(**client_kwargs)
+        elif self.provider == "gemini":
+            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+            self.model = genai.GenerativeModel(
+                model_name=self.model_name,
+                system_instruction=SYSTEM_PROMPT
+            )
+            
+        self.ta_tool = TechAnalysisTool()
+        self.risk_manager = RiskManager()
+        self.market_tool = MarketDataTool()
 
-    def run_cycle(self) -> dict[str, Any]:
-        candles = [
-            {
-                "timestamp": "2024-01-01T00:00:00",
-                "open": 100.0,
-                "high": 101.0,
-                "low": 99.0,
-                "close": 100.5,
-                "volume": 10.0,
-            }
-        ]
-        market_data_inserted = self.market_data_service.sync_market_data("BTCUSDT", candles)
-        recent_decisions = self.memory.get_recent_decisions("BTCUSDT", limit=3)
-        signal = self.tech_analysis_service.analyze("BTCUSDT", limit=3)
-        decision = self.decision_policy.decide(signal["signal"], recent_decisions)
-        side = "BUY" if decision == "buy" else "HOLD"
-        trade_result = self.risk_manager.validate_trade(
-            symbol="BTCUSDT",
-            quantity=0.015,
-            side=side,
-            entry_price=65000.0,
-        )
-        broker_result = self.broker.place_order("BTCUSDT", side, 0.015, 65000.0)
-        self.memory.save_decision("BTCUSDT", decision, trade_result["status"], "now")
+    def _call_llm(self, prompt: str, retries=3):
+        for i in range(retries):
+            try:
+                if self.provider in {"openai", "openrouter"}:
+                    response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                        temperature=0.2
+                    )
+                    return response.choices[0].message.content
+                
+                elif self.provider == "gemini":
+                    response = self.model.generate_content(prompt)
+                    return response.text.strip()
+                    
+            except Exception as e:
+                # Tratamento robusto de cota excedida (429) usando loop em vez de recursão
+                if "429" in str(e) and i < retries - 1:
+                    wait_time = 60 * (i + 1)
+                    logging.warning(f"⚠️ Limite de cota atingido (429). Retentativa {i+1} em {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logging.error(f"❌ Erro crítico ao contactar o LLM ({self.provider}): {e}")
+                    return "AGUARDAR. Falha no processamento."
+        return "AGUARDAR. Limite de tentativas excedido."
 
-        return {
-            "status": trade_result["status"],
-            "market_data_inserted": market_data_inserted,
-            "trade_status": trade_result["status"],
-            "signal": signal["signal"],
-            "decision": decision,
-            "recent_decisions": recent_decisions,
-            "broker_result": broker_result,
-            "message": trade_result["message"],
-        }
+    def run_cycle(self, symbol: str):
+        logging.info(f"--- [v2.0] Ciclo Iniciado ({self.provider}): {symbol} ---")
+        
+        self.market_tool.fetch_and_save_incremental(symbol)
+        tech_summary = self.ta_tool.analyze(symbol)
+        
+        if "Dados insuficientes" in tech_summary: 
+            logging.warning("Abortando ciclo por falta de dados.")
+            return
+
+        prompt_usuario = f"Análise técnica para o par {symbol}. Dados: {tech_summary}. Com base nestes dados, atue como um especialista em trading. Qual a sua decisão de compra, venda ou espera, e qual o fundamento técnico?"
+        logging.info(f"📝 Prompt enviado à IA: {prompt_usuario}")
+        
+        decisao_ia = self._call_llm(prompt_usuario)
+        logging.info(f"🗣️ Resposta da IA: {decisao_ia}")
+
+        # Extração da ação (COMPRAR/VENDER/AGUARDAR)
+        # Sanitização para lidar com possíveis espaços ou quebras de linha
+        acao = decisao_ia.split(".")[0].split(" ")[0].upper()
+        
+        if acao in ["COMPRAR", "VENDER"]:
+            df_atual = self.market_tool.get_data_for_analysis(symbol, limit=1)
+            preco = df_atual.iloc[-1]['close']
+            self.risk_manager.evaluate_and_execute(symbol, acao, preco, decisao_ia)
+        else:
+            logging.info("⚖️ Ação descartada ou IA decidiu AGUARDAR.")

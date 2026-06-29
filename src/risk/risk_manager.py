@@ -1,65 +1,43 @@
-from __future__ import annotations
-
-import sqlite3
-from pathlib import Path
-from typing import Any
-
 import yaml
-
+import datetime
+from database import SessionLocal, TradesLog
+from src.brokers.binance import BinanceBroker
 
 class RiskManager:
-    """Valida operações e registra ordens simuladas quando o modo dry run está ativo."""
+    def __init__(self):
+        with open("config/settings.yaml", "r") as file:
+            self.settings = yaml.safe_load(file)
 
-    def __init__(self, settings_path: str | Path | None = None, db_path: str | Path | None = None) -> None:
-        self.settings_path = Path(settings_path or "config/settings.yaml")
-        self.db_path = Path(db_path or "data/trading_db.sqlite")
-        self._settings = self._load_settings()
-        self._ensure_db()
+        self.is_dry_run = self.settings["execution_mode"]["dry_run"]
+        self.risk_pct = self.settings["risk_management"]["risk_per_trade_percent"]
+        self.db_session = SessionLocal()
+        self.broker = BinanceBroker()
 
-    def _load_settings(self) -> dict[str, Any]:
-        with self.settings_path.open("r", encoding="utf-8") as handle:
-            return yaml.safe_load(handle) or {}
+    def evaluate_and_execute(self, symbol: str, action: str, current_price: float, reason: str):
+        banca_simulada = 1000.00 # USD
+        risco_financeiro = banca_simulada * (self.risk_pct / 100)
+        quantidade = round(risco_financeiro / current_price, 5)
 
-    def _ensure_db(self) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS trades_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    quantity REAL NOT NULL,
-                    side TEXT NOT NULL,
-                    entry_price REAL NOT NULL,
-                    status TEXT NOT NULL,
-                    message TEXT NOT NULL
-                )
-                """
-            )
+        if quantidade <= 0:
+            print("🛡️ RiskManager bloqueou a operação: Lote calculado muito baixo.")
+            return
 
-    def validate_trade(self, symbol: str, quantity: float, side: str, entry_price: float) -> dict[str, Any]:
-        execution_mode = self._settings.get("execution_mode", {})
-        if execution_mode.get("dry_run", True):
-            message = f"[DRY RUN] {side} {quantity} {symbol} @ {entry_price}"
-            self._log_trade(symbol, quantity, side, entry_price, "dry_run", message)
-            return {"status": "dry_run", "message": message}
+        if self.is_dry_run:
+            print(f"👻 [DRY RUN] Executando ordem fantasma: {action} {quantidade} {symbol} a ${current_price:.2f}")
+            self._log_trade(symbol, action, current_price, quantidade, True, reason)
+        else:
+            self.broker.execute_order(symbol, action, quantidade)
+            self._log_trade(symbol, action, current_price, quantidade, False, reason)
 
-        return {"status": "live", "message": "Order forwarded to broker adapter"}
-
-    def _log_trade(
-        self,
-        symbol: str,
-        quantity: float,
-        side: str,
-        entry_price: float,
-        status: str,
-        message: str,
-    ) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO trades_log (symbol, quantity, side, entry_price, status, message)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (symbol, quantity, side, entry_price, status, message),
-            )
+    def _log_trade(self, symbol, action, price, quantity, is_dry_run, reason):
+        trade = TradesLog(
+            timestamp=datetime.datetime.utcnow(),
+            symbol=symbol,
+            action=action,
+            price=price,
+            quantity=quantity,
+            is_dry_run=is_dry_run,
+            reason=reason
+        )
+        self.db_session.add(trade)
+        self.db_session.commit()

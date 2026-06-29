@@ -1,7 +1,13 @@
+llm_config:
+  provider: "openrouter"        # Opções: "openai", "openrouter" ou "gemini"
+  model_name: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"  # Ex.: "openai/gpt-4o-mini" para OpenRouter, "gemini-3.5-flash" para Google
+
 execution_mode:
   dry_run: true
   timeframe: "15m"
+  active_symbols: ["BTCUSDT", "ETHUSDT"]  # Adicione os símbolos que deseja monitorar
 
 risk_management:
   risk_per_trade_percent: 1.0
   max_daily_drawdown: 5.0
+  default_stop_loss_pct: 2.0
