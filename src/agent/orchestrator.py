@@ -96,19 +96,26 @@ class AgentOrchestrator:
             logging.warning("Abortando ciclo por falta de dados.")
             return
 
-        prompt_usuario = f"Análise técnica para o par {symbol}. Dados: {tech_summary}. Com base nestes dados, atue como um especialista em trading. Qual a sua decisão de compra, venda ou espera, e qual o fundamento técnico?"
+        # Busca a posição atual no banco de dados
+        posicao_atual = self.risk_manager.get_position(symbol)
+        status_posicao = f"Você está COMPRADO em {posicao_atual} unidades." if posicao_atual > 0 else "ZERO (Você NÃO possui posições abertas)."
+
+        # Injeta o contexto da carteira no prompt
+        prompt_usuario = f"Ativo: {symbol}. Posição Atual na Carteira: {status_posicao}\nDados Técnicos: {tech_summary}. Atue como um especialista em trading. Qual a sua decisão (COMPRAR, VENDER, MANTER ou AGUARDAR) e o fundamento técnico?"
+        
         logging.info(f"📝 Prompt enviado à IA: {prompt_usuario}")
         
         decisao_ia = self._call_llm(prompt_usuario)
         logging.info(f"🗣️ Resposta da IA: {decisao_ia}")
 
-        # Extração da ação (COMPRAR/VENDER/AGUARDAR)
-        # Sanitização para lidar com possíveis espaços ou quebras de linha
+        # Extração da ação (COMPRAR/VENDER/AGUARDAR/MANTER)
         acao = decisao_ia.split(".")[0].split(" ")[0].upper()
         
         if acao in ["COMPRAR", "VENDER"]:
             df_atual = self.market_tool.get_data_for_analysis(symbol, limit=1)
             preco = df_atual.iloc[-1]['close']
             self.risk_manager.evaluate_and_execute(symbol, acao, preco, decisao_ia)
+        elif acao == "MANTER":
+            logging.info(f"🛡️ IA decidiu MANTER a posição atual de {symbol}.")
         else:
-            logging.info("⚖️ Ação descartada ou IA decidiu AGUARDAR.")
+            logging.info(f"⚖️ IA decidiu AGUARDAR (Ficar de fora do mercado).")
