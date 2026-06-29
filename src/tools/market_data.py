@@ -1,3 +1,5 @@
+import logging
+
 import pandas as pd
 from binance.client import Client
 from sqlalchemy.sql import func
@@ -19,7 +21,11 @@ class MarketDataTool:
         start_str = last_date.strftime("%d %b %Y %H:%M:%S") if last_date else "5 days ago UTC"
 
         print(f"[{symbol}] Sincronizando preços a partir de {start_str}...")
-        klines = self.client.get_historical_klines(symbol, interval, start_str)
+        try:
+            klines = self.client.get_historical_klines(symbol, interval, start_str)
+        except Exception as e:
+            logging.error(f"Erro de conexão com Binance ({symbol}): {e}")
+            return False # Apenas retorna False e espera o próximo ciclo
 
         if not klines:
             return False
