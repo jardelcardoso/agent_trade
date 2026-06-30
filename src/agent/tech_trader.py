@@ -5,11 +5,12 @@ from src.tools.market_data import MarketDataTool
 from src.risk.risk_manager import RiskManager
 
 class TechTrader:
-    """Versão 3.0: Algoritmo puro de Python. Executa rápido e sem atrasos (Zero IA aqui)."""
+    """Versão 3.0: Algoritmo puro de Python. O Executor consciente da posição."""
     def __init__(self):
         self.ta_tool = TechAnalysisTool()
         self.market_tool = MarketDataTool()
         self.risk_manager = RiskManager()
+
     def _get_current_regime(self, symbol: str):
         """Lê a ordem ditada pelo Estrategista (IA)."""
         file_path = f"data/{symbol}_regime.txt"
@@ -19,17 +20,18 @@ class TechTrader:
         return "NEUTRAL"
 
     def execute_fast_cycle(self, symbol: str):
+        # 1. Recupera o Contexto
         regime = self._get_current_regime(symbol)
-        logging.info(f"⚡ Iniciando Varredura Técnica [{symbol}] | Regime Permitido: {regime}")
+        posicao = self.risk_manager.get_position(symbol) # O SEU ESTOQUE ATUAL
+        
+        logging.info(f"⚡ Varredura Técnica [{symbol}] | Regime: {regime} | Posição Atual: {posicao}")
         
         self.market_tool.fetch_and_save_incremental(symbol)
         df = self.market_tool.get_data_for_analysis(symbol, limit=100)
         
         if df.empty or len(df) < 50:
-            logging.warning("Sem dados suficientes.")
             return
 
-        # Calcula indicadores matemáticos (rápido, exato)
         import ta
         df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
         df['sma_20'] = ta.trend.SMAIndicator(df['close'], window=20).sma_indicator()
@@ -39,37 +41,40 @@ class TechTrader:
         rsi = last_row['rsi']
         sma20 = last_row['sma_20']
         
-        posicao = self.risk_manager.get_position(symbol)
+        # Lógica de decisão consciente da posição
         acao = "MANTER"
-        motivo = ""
+        motivo = "Condições não atendidas para mudança de posição."
 
-        # ==========================================
-        # LÓGICA INSTITUCIONAL (Regime + Matemática)
-        # ==========================================
+        # === REGRAS DE EXECUÇÃO ===
         if regime == "BULLISH":
-            if rsi < 35 and preco > sma20:
+            # Se não tem posição e RSI está baixo, compra
+            if posicao <= 0 and rsi < 35 and preco > sma20:
                 acao = "COMPRAR"
-                motivo = "Regime BULLISH + RSI Sobrevendido em Tendência de Alta."
-            elif rsi > 75 and posicao > 0:
+                motivo = "Regime BULLISH: Entrada técnica em RSI baixo."
+            # Se já tem posição e RSI está muito alto, vende
+            elif posicao > 0 and rsi > 75:
                 acao = "VENDER"
-                motivo = "Realização de lucros em zona de super-euforia."
+                motivo = "Regime BULLISH: Realização de lucro (RSI esticado)."
 
         elif regime == "BEARISH":
+            # Se tem posição aberta no Bear Market, vende imediatamente para estancar sangria
             if posicao > 0:
                 acao = "VENDER"
-                motivo = "Regime BEARISH decretado. Cortando risco (Stop)."
-            # Não fazemos compras (Long) em Bear Market no nosso MVP.
+                motivo = "Regime BEARISH: Liquidação de proteção (Stop Loss/Redução)."
+            # Se não tem posição, fica parado (não faz nada)
 
         elif regime == "NEUTRAL":
-            if rsi < 25: # Exige um desconto muito maior para comprar
+            # Compra apenas em pânico absoluto
+            if posicao <= 0 and rsi < 25:
                 acao = "COMPRAR"
-                motivo = "Pânico extremo identificado durante regime Neutro."
-            elif rsi > 70 and posicao > 0:
+                motivo = "Regime NEUTRAL: Compra de pânico (oversold)."
+            # Vende se estiver esticado
+            elif posicao > 0 and rsi > 70:
                 acao = "VENDER"
-                motivo = "Regime Neutro + RSI esticado. Saindo da operação."
+                motivo = "Regime NEUTRAL: Saída técnica."
 
         # Execução final
         if acao in ["COMPRAR", "VENDER"]:
             self.risk_manager.evaluate_and_execute(symbol, acao, preco, motivo)
         else:
-            logging.info(f"🛡️ Nenhuma oportunidade exata matemática encontrada para {symbol} agora.")
+            logging.info(f"🛡️ {acao}: Sem necessidade de mudar posição atual de {posicao} {symbol}.")
